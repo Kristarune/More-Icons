@@ -1,0 +1,112 @@
+#include "IconViewPopup.hpp"
+#include "ViewShipFirePopup.hpp"
+#include "ViewIconPopup.hpp"
+#include "../../misc/LazyIcon.hpp"
+#include "../../../utils/Constants.hpp"
+#include "../../../utils/Get.hpp"
+#include <Geode/binding/GameManager.hpp>
+#include <Geode/binding/GJItemIcon.hpp>
+#include <Geode/ui/Scrollbar.hpp>
+#include <Geode/ui/ScrollLayer.hpp>
+#include <MoreIcons.hpp>
+
+using namespace geode::prelude;
+
+IconViewPopup* IconViewPopup::create(IconType type, bool custom) {
+    auto ret = new IconViewPopup();
+    if (ret->init(type, custom)) {
+        ret->autorelease();
+        return ret;
+    }
+    delete ret;
+    return nullptr;
+}
+
+bool IconViewPopup::init(IconType type, bool custom) {
+    if (!BasePopup::init(440.0f, 290.0f, "geode.loader/GE_square03.png", CircleBaseColor::DarkPurple)) return false;
+
+    setID("IconViewPopup");
+    auto name = Constants::getPluralUppercase(type);
+    setTitle(custom ? fmt::format("Custom {}", name) : fmt::format("Vanilla {}", name));
+    m_title->setID("icon-view-title");
+
+    auto scrollBackground = CCLayerColor::create({ 0, 0, 0, 105 }, 400.0f, 240.0f);
+    scrollBackground->setPosition({ 215.0f, 135.0f });
+    scrollBackground->ignoreAnchorPointForPosition(false);
+    scrollBackground->setID("scroll-background");
+    m_mainLayer->addChild(scrollBackground);
+
+    auto scrollLayer = ScrollLayer::create({ 400.0f, 240.0f });
+    auto contentLayer = scrollLayer->m_contentLayer;
+    scrollLayer->setPosition({ 215.0f, 135.0f });
+    scrollLayer->ignoreAnchorPointForPosition(false);
+    contentLayer->ignoreAnchorPointForPosition(false);
+    scrollLayer->setID("scroll-layer");
+    m_mainLayer->addChild(scrollLayer);
+
+    if (custom) {
+        if (auto icons = more_icons::getIcons(type)) {
+            for (auto& info : *icons) {
+                auto iconMenu = CCMenu::create();
+                auto lazyIcon = LazyIcon::create(type, 0, &info, {}, [this, info = &info, type] {
+                if (type == IconType::ShipFire) {
+                    ViewShipFirePopup::create(0, info)->show();
+                }
+                else {
+                    ViewIconPopup::create(type, 0, info)->show();
+                }
+                });
+                lazyIcon->setPosition({ 15.0f, 30.0f });
+                iconMenu->setContentSize({ 30.0f, 30.0f });
+                iconMenu->ignoreAnchorPointForPosition(false);
+                iconMenu->setID(fmt::format("{}-menu", lazyIcon->getID()));
+                iconMenu->addChild(lazyIcon);
+                contentLayer->addChild(iconMenu);
+            }
+        }
+    }
+    else {
+        auto count = Get::gameManager->countForType(type);
+        for (int i = 1; i <= count; i++) {
+            auto iconMenu = CCMenu::create();
+            auto lazyIcon = LazyIcon::create(type, i, nullptr, {}, [this, i, type] {
+                if (type == IconType::ShipFire) {
+                    ViewShipFirePopup::create(i, nullptr)->show();
+                }
+                else {
+                    ViewIconPopup::create(type, i, nullptr)->show();
+                }
+            });
+            lazyIcon->setPosition({ 15.0f, 30.0f });
+            iconMenu->setContentSize({ 30.0f, 30.0f });
+            iconMenu->ignoreAnchorPointForPosition(false);
+            iconMenu->setID(fmt::format("{}-menu", lazyIcon->getID()));
+            iconMenu->addChild(lazyIcon);
+            contentLayer->addChild(iconMenu);
+        }
+    }
+
+    contentLayer->setLayout(RowLayout::create()->setGap(Constants::getIconGap(type))->setGrowCrossAxis(true));
+
+    contentLayer->setContentSize(contentLayer->getContentSize() + CCSize { 0.0f, 10.0f });
+    for (auto child : CCArrayExt<CCNode, false>(contentLayer->getChildren())) {
+        child->setPosition(child->getPosition() + CCPoint { 0.0f, 5.0f });
+        child->setContentSize(child->getContentSize() + CCSize { 0.0f, 30.0f });
+    }
+
+    scrollLayer->scrollToTop();
+
+    auto scrollable = contentLayer->getContentHeight() > scrollLayer->getContentHeight();
+    scrollLayer->enableScrollWheel(scrollable);
+    scrollLayer->setTouchEnabled(scrollable);
+
+    auto scrollbar = Scrollbar::create(scrollLayer);
+    scrollbar->setPosition({ 425.0f, 135.0f });
+    scrollbar->setTouchEnabled(scrollable);
+    scrollbar->setID("scrollbar");
+    m_mainLayer->addChild(scrollbar);
+
+    handleTouchPriority(this);
+
+    return true;
+}

@@ -1,0 +1,634 @@
+#include "IconInfoImpl.hpp"
+#include "../MoreIcons.hpp"
+#include "../classes/popup/info/MoreInfoPopup.hpp"
+#include "../utils/Filesystem.hpp"
+#include "../utils/Get.hpp"
+#include "../utils/Icons.hpp"
+#include "../utils/Load.hpp"
+#include <Geode/binding/CCPartAnimSprite.hpp>
+#include <Geode/binding/CCSpritePart.hpp>
+#include <Geode/binding/GJSpiderSprite.hpp>
+#include <Geode/binding/SimplePlayer.hpp>
+#include <Geode/loader/Mod.hpp>
+#define GEODE_DEFINE_EVENT_EXPORTS
+#include <MoreIcons.hpp>
+#include <ranges>
+#include <texpack.hpp>
+
+using namespace geode::prelude;
+
+std::map<IconType, std::vector<IconInfo>> iconsMap = {
+    { IconType::Cube, {} },
+    { IconType::Ship, {} },
+    { IconType::Ball, {} },
+    { IconType::Ufo, {} },
+    { IconType::Wave, {} },
+    { IconType::Robot, {} },
+    { IconType::Spider, {} },
+    { IconType::Swing, {} },
+    { IconType::Jetpack, {} },
+    { IconType::DeathEffect, {} },
+    { IconType::Special, {} },
+    { IconType::ShipFire, {} }
+};
+std::map<IconType, std::pair<IconInfo*, IconInfo*>> activeIcons = {
+    { IconType::Cube, { nullptr, nullptr } },
+    { IconType::Ship, { nullptr, nullptr } },
+    { IconType::Ball, { nullptr, nullptr } },
+    { IconType::Ufo, { nullptr, nullptr } },
+    { IconType::Wave, { nullptr, nullptr } },
+    { IconType::Robot, { nullptr, nullptr } },
+    { IconType::Spider, { nullptr, nullptr } },
+    { IconType::Swing, { nullptr, nullptr } },
+    { IconType::Jetpack, { nullptr, nullptr } },
+    { IconType::DeathEffect, { nullptr, nullptr } },
+    { IconType::Special, { nullptr, nullptr } },
+    { IconType::ShipFire, { nullptr, nullptr } }
+};
+
+FLAlertLayer* more_icons::createInfoPopup(IconInfo* info) {
+    if (info) return MoreInfoPopup::create(info);
+    else return nullptr;
+}
+
+const std::map<IconType, std::vector<IconInfo>>& more_icons::getAllIcons() {
+    return iconsMap;
+}
+
+void more_icons::clearAllIcons() {
+    for (auto& [type, icons] : iconsMap) {
+        icons.clear();
+    }
+    for (auto& [type, pair] : activeIcons) {
+        pair.first = nullptr;
+        pair.second = nullptr;
+    }
+}
+
+std::vector<IconInfo>* more_icons::getIcons(IconType type) {
+    auto it = iconsMap.find(type);
+    return it != iconsMap.end() ? &it->second : nullptr;
+}
+
+IconInfo* more_icons::getIcon(std::string_view name, IconType type) {
+    if (name.empty()) return nullptr;
+    if (auto icons = getIcons(type)) {
+        for (auto& icon : *icons) {
+            if (name == icon.getName()) return &icon;
+        }
+    }
+    return nullptr;
+}
+
+IconInfo* more_icons::activeIcon(IconType type, bool dual) {
+    if (auto it = activeIcons.find(type); it != activeIcons.end()) {
+        if (dual && MoreIcons::separateDualIcons) return it->second.second;
+        else return it->second.first;
+    }
+    return nullptr;
+}
+
+IconInfo* more_icons::setIcon(IconInfo* info, IconType type, bool dual) {
+    auto& pair = activeIcons[type];
+    auto& saveContainer = Mod::get()->getSaveContainer();
+    if (dual && MoreIcons::separateDualIcons) {
+        auto oldInfo = pair.second;
+        pair.second = info;
+        saveContainer.set(saveKey(type, true), info ? info->getName() : std::string());
+        return oldInfo;
+    }
+    else {
+        auto oldInfo = pair.first;
+        pair.first = info;
+        saveContainer.set(saveKey(type, false), info ? info->getName() : std::string());
+        return oldInfo;
+    }
+}
+
+CCTexture2D* more_icons::loadIcon(IconInfo* info, int requestID) {
+    if (!info) return nullptr;
+
+    auto texture = Get::textureCache->textureForKey(info->getTextureString().c_str());
+    if (Icons::preloadIcons) return texture;
+
+    auto& loadedIcon = Icons::loadedIcons[info];
+
+    if (loadedIcon < 1) texture = Icons::createAndAddFrames(info);
+
+    auto type = info->getType();
+    auto requestedIcon = Icons::requestedIcons[requestID][type];
+    if (requestedIcon != info) {
+        loadedIcon++;
+        if (requestedIcon) unloadIcon(requestedIcon, requestID);
+        Icons::requestedIcons[requestID][type] = info;
+    }
+
+    return texture;
+}
+
+void more_icons::unloadIcon(IconInfo* info, int requestID) {
+    if (Icons::preloadIcons || !info) return;
+
+    auto& loadedIcon = Icons::loadedIcons[info];
+
+    loadedIcon--;
+    if (loadedIcon < 1) Icons::uncacheIcon(info);
+
+    Icons::requestedIcons[requestID].erase(info->getType());
+    if (Icons::requestedIcons[requestID].empty()) Icons::requestedIcons.erase(requestID);
+}
+
+void more_icons::unloadIcons(int requestID) {
+    if (Icons::preloadIcons) return;
+
+    auto foundRequests = Icons::requestedIcons.find(requestID);
+    if (foundRequests == Icons::requestedIcons.end()) return;
+
+    auto& iconRequests = foundRequests->second;
+    for (int i = 0; i < 9; i++) {
+        auto type = (IconType)i;
+        if (auto found = iconRequests.find(type); found != iconRequests.end()) {
+            auto info = found->second;
+            if (info) unloadIcon(info, requestID);
+        }
+    }
+
+    if (auto it = Icons::requestedIcons.find(requestID); it != Icons::requestedIcons.end()) {
+        Icons::requestedIcons.erase(it);
+    }
+}
+
+IconInfo* addIcon(
+    std::string name, std::string shortName, IconType type, std::filesystem::path png, std::filesystem::path plist,
+    std::filesystem::path json, std::filesystem::path icon, int quality, std::string packID, std::string packName,
+    int specialID, matjson::Value specialInfo, int fireCount, bool vanilla, bool zipped
+) {
+    auto icons = more_icons::getIcons(type);
+    if (!icons) return nullptr;
+    auto it = std::ranges::find_if(*icons, [&packID, &shortName, type](const IconInfo& icon) {
+        return icon.compare(packID, shortName, type) != std::strong_ordering::less;
+    });
+    if (it != icons->end() && it->equals(name, type)) icons->erase(it);
+
+    auto impl = std::make_shared<IconInfoImpl>(
+        std::move(name), std::move(shortName), type, std::move(png), std::move(plist),
+        std::move(json), std::move(icon), quality, std::move(packID), std::move(packName),
+        specialID, std::move(specialInfo), fireCount, vanilla, zipped
+    );
+    return std::to_address(icons->insert(it, IconInfo(std::move(impl))));
+}
+
+IconInfo* more_icons::addIcon(
+    std::string name, std::string shortName, IconType type, std::filesystem::path png, std::filesystem::path plist,
+    TextureQuality quality, std::string packID, std::string packName, bool vanilla, bool zipped
+) {
+    return ::addIcon(
+        std::move(name), std::move(shortName), type, std::move(png), std::move(plist), {}, {},
+        quality, std::move(packID), std::move(packName), 0, {}, 0, vanilla, zipped
+    );
+}
+
+IconInfo* more_icons::addTrail(
+    std::string name, std::string shortName, std::filesystem::path png, std::filesystem::path json, std::filesystem::path icon,
+    std::string packID, std::string packName, int specialID, matjson::Value specialInfo, bool vanilla, bool zipped
+) {
+    return ::addIcon(
+        std::move(name), std::move(shortName), IconType::Special, std::move(png), {}, std::move(json), std::move(icon),
+        0, std::move(packID), std::move(packName), specialID, std::move(specialInfo), 0, vanilla, zipped
+    );
+}
+
+IconInfo* more_icons::addDeathEffect(
+    std::string name, std::string shortName,
+    std::filesystem::path png, std::filesystem::path plist,
+    std::filesystem::path json, std::filesystem::path icon, TextureQuality quality,
+    std::string packID, std::string packName,
+    int specialID, matjson::Value specialInfo,
+    bool vanilla, bool zipped
+) {
+    return ::addIcon(
+        std::move(name), std::move(shortName), IconType::DeathEffect, std::move(png), std::move(plist), std::move(json), std::move(icon),
+        quality, std::move(packID), std::move(packName), specialID, std::move(specialInfo), 0, vanilla, zipped
+    );
+}
+
+IconInfo* more_icons::addShipFire(
+    std::string name, std::string shortName,
+    std::filesystem::path png, std::filesystem::path json, std::filesystem::path icon,
+    std::string packID, std::string packName,
+    int specialID, matjson::Value specialInfo,
+    int fireCount, bool vanilla, bool zipped
+) {
+    return ::addIcon(
+        std::move(name), std::move(shortName), IconType::ShipFire, std::move(png), {}, std::move(json), std::move(icon),
+        0, std::move(packID), std::move(packName), specialID, std::move(specialInfo), fireCount, vanilla, zipped
+    );
+}
+
+void more_icons::moveIcon(IconInfo* info, const std::filesystem::path& path) {
+    auto oldPngs = info->getAllTextures();
+    auto type = info->getType();
+    if (type <= IconType::Jetpack) {
+        info->setTexture(path / Filesystem::filenameView(info->getTexture()));
+        info->setSheet(path / Filesystem::filenameView(info->getSheet()));
+    }
+    else if (type >= IconType::DeathEffect) {
+        if (info->isVanilla()) {
+            if (type == IconType::DeathEffect) {
+                Filesystem::PathView png;
+                Filesystem::PathView plist;
+                switch (info->getQuality()) {
+                    case kTextureQualityHigh:
+                        png = L("effect-uhd.png");
+                        plist = L("effect-uhd.plist");
+                        break;
+                    case kTextureQualityMedium:
+                        png = L("effect-hd.png");
+                        plist = L("effect-hd.plist");
+                        break;
+                    case kTextureQualityLow:
+                        png = L("effect.png");
+                        plist = L("effect.plist");
+                        break;
+                }
+                info->setTexture(path / png);
+                info->setSheet(path / plist);
+            }
+            else if (type == IconType::Special) {
+                info->setTexture(path / L("trail.png"));
+            }
+            else if (type == IconType::ShipFire) {
+                info->setTexture(path / L("fire_001.png"));
+            }
+
+            info->setJSON(path / L("settings.json"));
+
+            auto factor = Get::director->getContentScaleFactor();
+            Filesystem::PathView icon;
+            if (factor >= 4.0f) icon = L("icon-uhd.png");
+            else if (factor >= 2.0f) icon = L("icon-hd.png");
+            else icon = L("icon.png");
+            info->setIcon(path / icon);
+        }
+        else {
+            if (auto& texture = info->getTexture(); !texture.empty()) {
+                info->setTexture(path / Filesystem::filenameView(texture));
+            }
+            if (auto& sheet = info->getSheet(); !sheet.empty()) {
+                info->setSheet(path / Filesystem::filenameView(sheet));
+            }
+            if (auto& json = info->getJSON(); !json.empty()) {
+                info->setJSON(path / Filesystem::filenameView(json));
+            }
+            if (auto& icon = info->getIcon(); !icon.empty()) {
+                info->setIcon(path / Filesystem::filenameView(icon));
+            }
+        }
+    }
+
+    info->setVanilla(false);
+
+    auto newPngs = info->getAllTextures();
+    for (size_t i = 0; i < newPngs.size(); i++) {
+        auto& oldPng = oldPngs[i];
+        if (Ref<CCTexture2D> texture = Get::textureCache->textureForKey(oldPng.c_str())) {
+            Get::textureCache->removeTextureForKey(oldPng.c_str());
+            Get::textureCache->m_pTextures->setObject(texture, newPngs[i]);
+        }
+    }
+}
+
+void more_icons::removeIcon(IconInfo* info) {
+    Icons::loadedIcons.erase(info);
+
+    for (auto& frame : info->getFrameNames()) {
+        Get::spriteFrameCache->removeSpriteFrameByName(frame.c_str());
+    }
+    for (auto& textureString : info->getAllTextures()) {
+        Get::textureCache->removeTextureForKey(textureString.c_str());
+    }
+
+    auto type = info->getType();
+    if (!Icons::preloadIcons && type <= IconType::Jetpack) {
+        for (auto it = Icons::requestedIcons.begin(); it != Icons::requestedIcons.end();) {
+            auto& iconRequests = it->second;
+            auto iconRequest = iconRequests.find(type);
+            if (iconRequest != iconRequests.end() && iconRequest->second == info) {
+                iconRequests.erase(iconRequest);
+                if (iconRequests.empty()) it = Icons::requestedIcons.erase(it);
+                else ++it;
+            }
+            else ++it;
+        }
+    }
+
+    auto icons = getIcons(type);
+    if (icons) icons->erase(icons->begin() + (info - icons->data()));
+}
+
+void more_icons::renameIcon(IconInfo* info, std::string name) {
+    info->setName(info->inTexturePack() ? fmt::format("{}:{}", info->getPackID(), name) : name);
+    info->setShortName(std::move(name));
+
+    auto oldPngs = info->getAllTextures();
+    auto wideName = Filesystem::strWide(info->getShortName());
+    auto type = info->getType();
+
+    if (type <= IconType::Jetpack) {
+        std::filesystem::path::string_type png;
+        std::filesystem::path::string_type plist;
+        switch (info->getQuality()) {
+            case kTextureQualityHigh:
+                png = fmt::format(L("{}-uhd.png"), wideName);
+                plist = fmt::format(L("{}-uhd.plist"), wideName);
+                break;
+            case kTextureQualityMedium:
+                png = fmt::format(L("{}-hd.png"), wideName);
+                plist = fmt::format(L("{}-hd.plist"), wideName);
+                break;
+            case kTextureQualityLow:
+                png = fmt::format(L("{}.png"), wideName);
+                plist = fmt::format(L("{}.plist"), wideName);
+                break;
+        }
+        info->setTexture(Filesystem::parentPath(info->getTexture()) / png);
+        info->setSheet(Filesystem::parentPath(info->getSheet()) / plist);
+    }
+    else if (type >= IconType::DeathEffect) {
+        if (auto& texture = info->getTexture(); !texture.empty()) {
+            info->setTexture(Filesystem::parentPath(Filesystem::parentPath(texture)) / wideName / Filesystem::filenameView(texture));
+        }
+        if (auto& sheet = info->getSheet(); !sheet.empty()) {
+            info->setSheet(Filesystem::parentPath(Filesystem::parentPath(sheet)) / wideName / Filesystem::filenameView(sheet));
+        }
+        if (auto& json = info->getJSON(); !json.empty()) {
+            info->setJSON(Filesystem::parentPath(Filesystem::parentPath(json)) / wideName / Filesystem::filenameView(json));
+        }
+        if (auto& icon = info->getIcon(); !icon.empty()) {
+            info->setIcon(Filesystem::parentPath(Filesystem::parentPath(icon)) / wideName / Filesystem::filenameView(icon));
+        }
+    }
+
+    auto newPngs = info->getAllTextures();
+    for (size_t i = 0; i < newPngs.size(); i++) {
+        auto& oldPng = oldPngs[i];
+        if (Ref<CCTexture2D> texture = Get::textureCache->textureForKey(oldPng.c_str())) {
+            Get::textureCache->removeTextureForKey(oldPng.c_str());
+            Get::textureCache->m_pTextures->setObject(texture, newPngs[i]);
+        }
+    }
+
+    auto& frameNames = const_cast<std::vector<std::string>&>(info->getFrameNames());
+    auto& newName = info->getName();
+    if (!frameNames.empty()) {
+        for (auto& frameName : frameNames) {
+            if (Ref<CCSpriteFrame> spriteFrame = Icons::getFrame(frameName)) {
+                Get::spriteFrameCache->removeSpriteFrameByName(frameName.c_str());
+                Load::fixFrameName(frameName, newName, type);
+                Get::spriteFrameCache->addSpriteFrame(spriteFrame, frameName.c_str());
+            }
+        }
+    }
+
+    auto icons = getIcons(type);
+    if (!icons) return;
+
+    auto it = std::ranges::find_if(*icons, [info](const IconInfo& icon) {
+        return icon > *info;
+    });
+    if (std::to_address(it) == info) return;
+
+    auto icon = std::move(*info);
+    icons->erase(icons->begin() + (info - icons->data()));
+    icons->insert(it, std::move(icon));
+}
+
+void more_icons::updateIcon(IconInfo* info) {
+    CCTexture2D* texture = nullptr;
+    for (auto& textureString : info->getAllTextures()) {
+        texture = Get::textureCache->textureForKey(textureString.c_str());
+        if (!texture) continue;
+
+        auto binaryRes = file::readBinary(info->getTexture());
+        if (!binaryRes.isOk()) continue;
+
+        auto imageRes = texpack::fromPNG(binaryRes.unwrap(), true);
+        if (!imageRes.isOk()) continue;
+
+        auto image = std::move(imageRes).unwrap();
+
+        Load::initTexture(texture, image.data.data(), image.width, image.height);
+    }
+
+    if (!texture) return;
+
+    auto framesRes = Load::createFrames(info->getSheet(), texture, info->getName(), info->getType());
+    if (!framesRes.isOk()) return;
+
+    auto frames = std::move(framesRes).unwrap();
+    if (frames.empty()) return;
+
+    auto& frameNames = const_cast<std::vector<std::string>&>(info->getFrameNames());
+    for (auto it = frameNames.begin(); it != frameNames.end();) {
+        auto& frameName = *it;
+        if (auto frameIt = frames.find(frameName); frameIt != frames.end()) {
+            if (auto spriteFrame = Icons::getFrame(frameName)) {
+                auto frame = frameIt->second.data();
+                spriteFrame->m_obOffset = frame->m_obOffset;
+                spriteFrame->m_obOriginalSize = frame->m_obOriginalSize;
+                spriteFrame->m_obRectInPixels = frame->m_obRectInPixels;
+                spriteFrame->m_bRotated = frame->m_bRotated;
+                spriteFrame->m_obRect = frame->m_obRect;
+                spriteFrame->m_obOffsetInPixels = frame->m_obOffsetInPixels;
+                spriteFrame->m_obOriginalSizeInPixels = frame->m_obOriginalSizeInPixels;
+            }
+            frames.erase(frameIt);
+            ++it;
+        }
+        else {
+            Get::spriteFrameCache->removeSpriteFrameByName(frameName.c_str());
+            it = frameNames.erase(it);
+        }
+    }
+
+    for (auto& [frameName, frame] : frames) {
+        Get::spriteFrameCache->addSpriteFrame(frame, frameName.c_str());
+        frameNames.push_back(frameName);
+    }
+}
+
+void more_icons::updateSimplePlayer(SimplePlayer* player, IconInfo* info) {
+    if (!player || !info) return;
+
+    Icons::setIcon(player, info);
+
+    auto& icon = info->getName();
+    auto type = info->getType();
+
+    player->m_firstLayer->setVisible(type != IconType::Robot && type != IconType::Spider);
+    player->m_secondLayer->setVisible(type != IconType::Robot && type != IconType::Spider);
+    player->m_birdDome->setVisible(type == IconType::Ufo);
+
+    if (type == IconType::Robot) {
+        if (!player->m_robotSprite) player->createRobotSprite(1);
+        player->m_robotSprite->setVisible(true);
+        player->m_robotSprite->m_color = player->m_firstLayer->getColor();
+        player->m_robotSprite->m_secondColor = player->m_secondLayer->getColor();
+        player->m_robotSprite->updateColors();
+        updateRobotSprite(player->m_robotSprite, info);
+    }
+    else if (player->m_robotSprite) player->m_robotSprite->setVisible(false);
+
+    if (type == IconType::Spider) {
+        if (!player->m_spiderSprite) player->createSpiderSprite(1);
+        player->m_spiderSprite->setVisible(true);
+        player->m_spiderSprite->m_color = player->m_firstLayer->getColor();
+        player->m_spiderSprite->m_secondColor = player->m_secondLayer->getColor();
+        player->m_spiderSprite->updateColors();
+        updateRobotSprite(player->m_spiderSprite, info);
+    }
+    else if (player->m_spiderSprite) player->m_spiderSprite->setVisible(false);
+
+    if (type == IconType::Robot || type == IconType::Spider) return;
+
+    loadIcon(info, player->m_iconRequestID);
+
+    auto firstLayer = player->m_firstLayer;
+    firstLayer->setDisplayFrame(Icons::getFrame("{}_001.png"_spr, icon));
+    firstLayer->setScale(type == IconType::Ball ? 0.9f : 1.0f);
+    firstLayer->setPosition({ 0.0f, type == IconType::Ufo ? -7.0f : 0.0f });
+
+    auto firstCenter = firstLayer->getContentSize() / 2.0f;
+
+    auto secondLayer = player->m_secondLayer;
+    secondLayer->setDisplayFrame(Icons::getFrame("{}_2_001.png"_spr, icon));
+    secondLayer->setPosition(firstCenter);
+
+    auto outlineSprite = player->m_outlineSprite;
+    outlineSprite->setDisplayFrame(Icons::getFrame("{}_glow_001.png"_spr, icon));
+    outlineSprite->setPosition(firstCenter);
+
+    if (type == IconType::Ufo) {
+        auto birdDome = player->m_birdDome;
+        birdDome->setDisplayFrame(Icons::getFrame("{}_3_001.png"_spr, icon));
+        birdDome->setPosition(firstCenter);
+    }
+
+    auto extraFrame = Icons::getFrame("{}_extra_001.png"_spr, icon);
+    auto detailSprite = player->m_detailSprite;
+    detailSprite->setVisible(extraFrame != nullptr);
+    if (extraFrame) {
+        detailSprite->setDisplayFrame(extraFrame);
+        detailSprite->setPosition(firstCenter);
+    }
+}
+
+void more_icons::updateRobotSprite(GJRobotSprite* sprite, IconInfo* info) {
+    if (!sprite || !info) return;
+
+    Icons::setIcon(sprite, info);
+
+    auto texture = loadIcon(info, sprite->m_iconRequestID);
+    sprite->setBatchNode(nullptr);
+    sprite->setTexture(texture);
+
+    auto paSprite = sprite->m_paSprite;
+    paSprite->setBatchNode(nullptr);
+    paSprite->setTexture(texture);
+
+    auto spriteParts = CCArrayExt<CCSprite, false>(paSprite->m_spriteParts);
+    auto secondArray = CCArrayExt<CCSprite, false>(sprite->m_secondArray);
+    auto glowArray = CCArrayExt<CCSprite, false>(sprite->m_glowSprite->getChildren());
+    auto headSprite = sprite->m_headSprite;
+    auto extraSprite = sprite->m_extraSprite;
+    auto& icon = info->getName();
+
+    for (size_t i = 0; i < spriteParts.size(); i++) {
+        auto spritePart = spriteParts[i];
+        auto tag = spritePart->getTag();
+
+        spritePart->setBatchNode(nullptr);
+        spritePart->setDisplayFrame(Icons::getFrame("{}_{:02}_001.png"_spr, icon, tag));
+        if (auto secondSprite = secondArray[i]) {
+            secondSprite->setBatchNode(nullptr);
+            secondSprite->setDisplayFrame(Icons::getFrame("{}_{:02}_2_001.png"_spr, icon, tag));
+            secondSprite->setPosition(spritePart->getContentSize() / 2.0f);
+        }
+
+        if (auto glowChild = glowArray[i]) {
+            glowChild->setBatchNode(nullptr);
+            glowChild->setDisplayFrame(Icons::getFrame("{}_{:02}_glow_001.png"_spr, icon, tag));
+        }
+
+        if (spritePart == headSprite) {
+            auto extraFrame = Icons::getFrame("{}_{:02}_extra_001.png"_spr, icon, tag);
+            if (extraFrame) {
+                if (extraSprite) {
+                    extraSprite->setBatchNode(nullptr);
+                    extraSprite->setDisplayFrame(extraFrame);
+                }
+                else {
+                    extraSprite = CCSprite::createWithSpriteFrame(extraFrame);
+                    sprite->m_extraSprite = extraSprite;
+                    spritePart->addChild(extraSprite, 2);
+                }
+                extraSprite->setPosition(spritePart->getContentSize() / 2.0f);
+            }
+            extraSprite->setVisible(extraFrame != nullptr);
+        }
+    }
+}
+
+void more_icons::updatePlayerObject(PlayerObject* object, IconInfo* info) {
+    if (!object || !info) return;
+
+    Icons::setIcon(object, info);
+
+    auto& icon = info->getName();
+    auto type = info->getType();
+
+    if (type == IconType::Robot) {
+        if (auto robotSprite = object->m_robotSprite) {
+            auto batchNode = object->m_robotBatchNode;
+            batchNode->removeSpriteFromAtlas(robotSprite);
+            updateRobotSprite(robotSprite, info);
+            batchNode->setTexture(robotSprite->getTexture());
+            batchNode->appendChild(robotSprite);
+        }
+        return;
+    }
+    else if (type == IconType::Spider) {
+        if (auto spiderSprite = object->m_spiderSprite) {
+            auto batchNode = object->m_spiderBatchNode;
+            batchNode->removeSpriteFromAtlas(spiderSprite);
+            updateRobotSprite(spiderSprite, info);
+            batchNode->setTexture(spiderSprite->getTexture());
+            batchNode->appendChild(spiderSprite);
+        }
+        return;
+    }
+
+    loadIcon(info, object->m_iconRequestID);
+
+    auto isVehicle = type == IconType::Ship || type == IconType::Ufo || type == IconType::Jetpack;
+    auto firstLayer = isVehicle ? object->m_vehicleSprite : object->m_iconSprite;
+    auto secondLayer = isVehicle ? object->m_vehicleSpriteSecondary : object->m_iconSpriteSecondary;
+    auto outlineSprite = isVehicle ? object->m_vehicleGlow : object->m_iconGlow;
+    auto detailSprite = isVehicle ? object->m_vehicleSpriteWhitener : object->m_iconSpriteWhitener;
+
+    firstLayer->setDisplayFrame(Icons::getFrame("{}_001.png"_spr, icon));
+    secondLayer->setDisplayFrame(Icons::getFrame("{}_2_001.png"_spr, icon));
+    auto firstCenter = firstLayer->getContentSize() / 2.0f;
+    secondLayer->setPosition(firstCenter);
+    if (type == IconType::Ufo) {
+        object->m_birdVehicle->setDisplayFrame(Icons::getFrame("{}_3_001.png"_spr, icon));
+        object->m_birdVehicle->setPosition(firstCenter);
+    }
+    outlineSprite->setDisplayFrame(Icons::getFrame("{}_glow_001.png"_spr, icon));
+    auto extraFrame = Icons::getFrame("{}_extra_001.png"_spr, icon);
+    detailSprite->setVisible(extraFrame != nullptr);
+    if (extraFrame) {
+        detailSprite->setDisplayFrame(extraFrame);
+        detailSprite->setPosition(firstCenter);
+    }
+}
